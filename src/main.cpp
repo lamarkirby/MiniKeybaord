@@ -28,6 +28,11 @@ void sendCtrlAltDel()
   bleKeyboard.press(KEY_DELETE);
   delay(100);
   bleKeyboard.releaseAll();
+  delay(3000);
+  if (bleKeyboard.isConnected())
+  {
+    bleKeyboard.print("Blessed are the peacemakers!");
+  }
 }
 
 void sendSleepCombo()
