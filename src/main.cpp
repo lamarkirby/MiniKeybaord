@@ -2,13 +2,10 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <BleKeyboard.h>
+#include "secrets.h"
 
 // ===== BLE Keyboard =====
 BleKeyboard bleKeyboard("CtrlAltDel", "Topo Consulting LLC", 100);
-
-// ===== WiFi Config =====
-const char *ssid = "KirbyNet";
-const char *password = "4806508554";
 
 // ===== Web Server =====
 WebServer server(80);
@@ -16,6 +13,17 @@ WebServer server(80);
 // ===== LED Config =====
 const int LED_PIN = 12; // Onboard LED for most ESP32 dev boards
 bool ledState = false;
+
+// ===== WiFi Config =====
+unsigned long lastWiFiCheck = 0;
+unsigned long wifiFailTime = 0;
+bool wifiConnected = false;
+bool ledFlashing = false;
+
+// ===== Power Management =====
+unsigned long lastActivityTime = 0;
+const unsigned long INACTIVITY_TIMEOUT = 600000; // 10 minutes in milliseconds
+const bool ENABLE_AUTO_SLEEP = true;
 
 // ====== BLE Functions ======
 void sendCtrlAltDel()
@@ -56,21 +64,91 @@ void sendSleepCombo()
   }
 }
 
+// ====== WiFi Monitoring ======
+void checkWiFiConnection()
+{
+  unsigned long now = millis();
+
+  if (WiFi.status() == WL_CONNECTED)
+  {
+    if (!wifiConnected)
+    {
+      wifiConnected = true;
+      ledFlashing = false;
+      digitalWrite(LED_PIN, LOW);
+      Serial.println("\nWiFi reconnected!");
+    }
+    wifiFailTime = 0; // Reset fail timer
+    lastWiFiCheck = now;
+  }
+  else
+  {
+    if (wifiConnected)
+    {
+      wifiConnected = false;
+      wifiFailTime = now;
+      Serial.println("\nWiFi disconnected!");
+    }
+
+    // If disconnected for more than 60 seconds, start flashing
+    if (now - wifiFailTime > 60000)
+    {
+      ledFlashing = true;
+    }
+  }
+
+  // Handle LED flashing (5 sec on, 5 sec off)
+  if (ledFlashing)
+  {
+    unsigned long flashCycle = (now / 5000) % 2; // Alternates every 5 seconds
+    digitalWrite(LED_PIN, flashCycle ? HIGH : LOW);
+  }
+}
+
+// ====== Power Management ======
+void checkInactivity()
+{
+  if (ENABLE_AUTO_SLEEP && (millis() - lastActivityTime) > INACTIVITY_TIMEOUT)
+  {
+    Serial.println("No activity for 10 minutes. Entering light sleep...");
+    esp_sleep_enable_timer_wakeup(INACTIVITY_TIMEOUT * 1000); // Convert ms to µs
+    esp_light_sleep_start();
+    Serial.println("Woke from light sleep.");
+    lastActivityTime = millis(); // Reset timer after waking
+  }
+}
+
 // ====== HTTP Handlers ======
+void handleRoot()
+{
+  lastActivityTime = millis();
+  String help = "ESP32 BLE Keyboard Remote\n\n";
+  help += "Available endpoints:\n";
+  help += "  GET /ctrlaltdel       - Send Ctrl+Alt+Del\n";
+  help += "  GET /sleep            - Send Win+X, U, S (Sleep)\n";
+  help += "  GET /led/toggle       - Toggle LED connected to pin " + String(LED_PIN) + "\n";
+  help += "  GET /type?msg=TEXT    - Type text via BLE keyboard\n";
+  help += "  GET /                 - Show this help\n";
+  server.send(200, "text/plain", help);
+}
+
 void handleCtrlAlt()
 {
   sendCtrlAltDel();
+  lastActivityTime = millis();
   server.send(200, "text/plain", "Sent Ctrl+Alt+Del");
 }
 
 void handleSleep()
 {
   sendSleepCombo();
+  lastActivityTime = millis();
   server.send(200, "text/plain", "Sent Sleep Combo");
 }
 
 void handleLedToggle()
 {
+  lastActivityTime = millis();
   ledState = !ledState;
   digitalWrite(LED_PIN, ledState ? HIGH : LOW);
   String msg = String("LED is now ") + (ledState ? "ON" : "OFF");
@@ -80,6 +158,7 @@ void handleLedToggle()
 
 void handleType()
 {
+  lastActivityTime = millis();
   if (!bleKeyboard.isConnected())
   {
     server.send(400, "text/plain", "BLE keyboard not connected");
@@ -95,13 +174,13 @@ void handleType()
   String msg = server.arg("msg");
   Serial.println("Typing: " + msg);
 
-  // Send message in 2 - character chunks 
-  const int MAX_CHUNK = 2;
+  // Send message in 4 - character chunks 
+  const int MAX_CHUNK = 4;
   for (int i = 0; i < msg.length(); i += MAX_CHUNK)
   {
     String chunk = msg.substring(i, i + MAX_CHUNK);
     bleKeyboard.print(chunk);
-    delay(200); // small delay between chunks
+    delay(100); // small delay between chunks
   }
   bleKeyboard.releaseAll();
 
@@ -115,23 +194,40 @@ void setup()
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
 
+  // Initialize activity timer
+  lastActivityTime = millis();
+
   // Start BLE keyboard
   Serial.println("Starting BLE Keyboard...");
   bleKeyboard.begin();
 
   // Connect to WiFi
   Serial.println("Connecting to WiFi...");
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED)
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 120) // 120 * 500ms = 60 seconds
   {
     delay(500);
     Serial.print(".");
+    attempts++;
   }
-  Serial.println();
-  Serial.println("WiFi connected!");
-  Serial.println(WiFi.localIP());
+
+  if (WiFi.status() == WL_CONNECTED)
+  {
+    wifiConnected = true;
+    Serial.println("\nWiFi connected!");
+    Serial.println(WiFi.localIP());
+  }
+  else
+  {
+    Serial.println("\nWiFi connection timeout. Will retry in background.");
+    wifiFailTime = millis();
+    WiFi.reconnect(); // Enable WiFi reconnection in background
+  }
 
   // Register HTTP routes
+  server.on("/", handleRoot);
   server.on("/ctrlaltdel", handleCtrlAlt);
   server.on("/sleep", handleSleep);
   server.on("/led/toggle", handleLedToggle);
@@ -145,5 +241,7 @@ void setup()
 // ====== Loop ======
 void loop()
 {
+  checkWiFiConnection();
+  checkInactivity();
   server.handleClient();
 }
