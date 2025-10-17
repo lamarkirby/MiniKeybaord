@@ -1,179 +1,149 @@
 #include <Arduino.h>
-#include <BleKeyboard.h>
 #include <WiFi.h>
 #include <WebServer.h>
+#include <BleKeyboard.h>
 
-// -------------------- CONFIG --------------------
-const char *WIFI_SSID = "KirbyNet";
-const char *WIFI_PASS = "4806508554";
-const char *API_KEY = ""; // optional – set "" to disable
-const int HTTP_PORT = 80;
-// ------------------------------------------------
-
+// ===== BLE Keyboard =====
 BleKeyboard bleKeyboard("CtrlAltDel", "Topo Consulting LLC", 100);
-WebServer server(HTTP_PORT);
 
-const int BUTTON_PIN = 0;       // BOOT button (GPIO0)
-const int LONG_PRESS_MS = 2000; // 2 seconds
-static bool lastState = HIGH;
-static unsigned long pressStart = 0;
-static bool longPressTriggered = false;
+// ===== WiFi Config =====
+const char *ssid = "KirbyNet";
+const char *password = "4806508554";
 
-// === Key press helpers ===
+// ===== Web Server =====
+WebServer server(80);
+
+// ===== LED Config =====
+const int LED_PIN = 12; // Onboard LED for most ESP32 dev boards
+bool ledState = false;
+
+// ====== BLE Functions ======
 void sendCtrlAltDel()
 {
-  Serial.println("Sending Ctrl + Alt + Del...");
-  bleKeyboard.press(KEY_LEFT_CTRL);
-  bleKeyboard.press(KEY_LEFT_ALT);
-  bleKeyboard.press(KEY_DELETE);
-  delay(100);
-  bleKeyboard.releaseAll();
-  delay(3000);
   if (bleKeyboard.isConnected())
   {
-    bleKeyboard.print("Blessed are the peacemakers!");
+    Serial.println("Sending Ctrl+Alt+Del...");
+    bleKeyboard.press(KEY_LEFT_CTRL);
+    bleKeyboard.press(KEY_LEFT_ALT);
+    bleKeyboard.press(KEY_DELETE);
+    delay(100);
+    bleKeyboard.releaseAll();
+  }
+  else
+  {
+    Serial.println("BLE not connected.");
   }
 }
 
 void sendSleepCombo()
 {
-  Serial.println("Sending Win+X -> U -> S (Sleep)...");
-  bleKeyboard.press(KEY_LEFT_GUI);
-  bleKeyboard.press('x');
-  bleKeyboard.releaseAll();
-  delay(500);
-
-  bleKeyboard.press('u');
-  bleKeyboard.releaseAll();
-  delay(500);
-
-  bleKeyboard.press('s');
-  bleKeyboard.releaseAll();
-}
-
-// === HTTP helpers ===
-bool checkApiKey()
-{
-  if (strlen(API_KEY) == 0)
-    return true;
-  if (server.hasHeader("X-API-Key"))
-    return server.header("X-API-Key") == API_KEY;
-  return false;
-}
-
-void handleRoot()
-{
-  server.send(200, "text/plain",
-              "ESP32 BLE Keyboard API is running.\n"
-              "Endpoints:\n"
-              "GET /ctrlaltdel\n"
-              "GET /sleep\n");
-}
-
-void handleCtrlAltDel()
-{
-  if (!checkApiKey())
-  {
-    server.send(401, "application/json", "{\"error\":\"unauthorized\"}");
-    return;
-  }
-
   if (bleKeyboard.isConnected())
   {
-    sendCtrlAltDel();
-    server.send(200, "application/json", "{\"status\":\"CtrlAltDel sent\"}");
+    Serial.println("Sending Win+X -> U -> S (Sleep)...");
+    bleKeyboard.press(KEY_LEFT_GUI);
+    bleKeyboard.press('x');
+    bleKeyboard.releaseAll();
+    delay(500);
+    bleKeyboard.press('u');
+    bleKeyboard.releaseAll();
+    delay(500);
+    bleKeyboard.press('s');
+    bleKeyboard.releaseAll();
   }
   else
   {
-    server.send(503, "application/json", "{\"error\":\"BLE not connected\"}");
+    Serial.println("BLE not connected.");
   }
+}
+
+// ====== HTTP Handlers ======
+void handleCtrlAlt()
+{
+  sendCtrlAltDel();
+  server.send(200, "text/plain", "Sent Ctrl+Alt+Del");
 }
 
 void handleSleep()
 {
-  if (!checkApiKey())
+  sendSleepCombo();
+  server.send(200, "text/plain", "Sent Sleep Combo");
+}
+
+void handleLedToggle()
+{
+  ledState = !ledState;
+  digitalWrite(LED_PIN, ledState ? HIGH : LOW);
+  String msg = String("LED is now ") + (ledState ? "ON" : "OFF");
+  Serial.println(msg);
+  server.send(200, "text/plain", msg);
+}
+
+void handleType()
+{
+  if (!bleKeyboard.isConnected())
   {
-    server.send(401, "application/json", "{\"error\":\"unauthorized\"}");
+    server.send(400, "text/plain", "BLE keyboard not connected");
     return;
   }
 
-  if (bleKeyboard.isConnected())
+  if (!server.hasArg("msg"))
   {
-    sendSleepCombo();
-    server.send(200, "application/json", "{\"status\":\"Sleep combo sent\"}");
+    server.send(400, "text/plain", "Missing 'msg' parameter");
+    return;
   }
-  else
+
+  String msg = server.arg("msg");
+  Serial.println("Typing: " + msg);
+
+  // Send message in 2 - character chunks 
+  const int MAX_CHUNK = 2;
+  for (int i = 0; i < msg.length(); i += MAX_CHUNK)
   {
-    server.send(503, "application/json", "{\"error\":\"BLE not connected\"}");
+    String chunk = msg.substring(i, i + MAX_CHUNK);
+    bleKeyboard.print(chunk);
+    delay(200); // small delay between chunks
   }
+  bleKeyboard.releaseAll();
+
+  server.send(200, "text/plain", "Typed message: " + msg);
 }
 
+// ====== Setup ======
 void setup()
 {
   Serial.begin(115200);
-  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
 
+  // Start BLE keyboard
   Serial.println("Starting BLE Keyboard...");
   bleKeyboard.begin();
 
-  Serial.printf("Connecting to Wi-Fi: %s\n", WIFI_SSID);
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  // Connect to WiFi
+  Serial.println("Connecting to WiFi...");
+  WiFi.begin(ssid, password);
   while (WiFi.status() != WL_CONNECTED)
   {
     delay(500);
     Serial.print(".");
   }
-  Serial.println("\nWi-Fi connected!");
-  Serial.print("IP Address: ");
+  Serial.println();
+  Serial.println("WiFi connected!");
   Serial.println(WiFi.localIP());
 
-  // Register routes
-  server.on("/", handleRoot);
-  server.on("/ctrlaltdel", handleCtrlAltDel);
+  // Register HTTP routes
+  server.on("/ctrlaltdel", handleCtrlAlt);
   server.on("/sleep", handleSleep);
+  server.on("/led/toggle", handleLedToggle);
+  server.on("/type", handleType);
 
-  // Handle undefined routes
-  server.onNotFound([]()
-                    { server.send(404, "text/plain", "Not found"); });
-
+  // Start HTTP server
   server.begin();
-  Serial.printf("HTTP server started on port %d\n", HTTP_PORT);
+  Serial.println("HTTP server started.");
 }
 
+// ====== Loop ======
 void loop()
 {
-  // Handle HTTP
   server.handleClient();
-
-  // Handle physical button (same logic as before)
-  bool currentState = digitalRead(BUTTON_PIN);
-  if (lastState == HIGH && currentState == LOW)
-  {
-    pressStart = millis();
-    longPressTriggered = false;
-  }
-
-  if (currentState == LOW && !longPressTriggered)
-  {
-    if (millis() - pressStart >= LONG_PRESS_MS)
-    {
-      if (bleKeyboard.isConnected())
-        sendSleepCombo();
-      longPressTriggered = true;
-    }
-  }
-
-  if (lastState == LOW && currentState == HIGH)
-  {
-    unsigned long pressDuration = millis() - pressStart;
-    if (!longPressTriggered && pressDuration < LONG_PRESS_MS)
-    {
-      if (bleKeyboard.isConnected())
-        sendCtrlAltDel();
-    }
-  }
-
-  lastState = currentState;
-  delay(50);
 }
