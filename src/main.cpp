@@ -5,7 +5,7 @@
 #include "secrets.h"
 
 // ===== BLE Keyboard =====
-BleKeyboard bleKeyboard("CtrlAltDel", "Topo Consulting LLC", 100);
+BleKeyboard bleKeyboard("TopoConKeyboard", "Topo Consulting LLC", 100);
 
 // ===== Web Server =====
 WebServer server(80);
@@ -19,11 +19,6 @@ unsigned long lastWiFiCheck = 0;
 unsigned long wifiFailTime = 0;
 bool wifiConnected = false;
 bool ledFlashing = false;
-
-// ===== Power Management =====
-unsigned long lastActivityTime = 0;
-const unsigned long INACTIVITY_TIMEOUT = 600000; // 10 minutes in milliseconds
-const bool ENABLE_AUTO_SLEEP = true;
 
 // ====== BLE Functions ======
 void sendCtrlAltDel()
@@ -105,23 +100,9 @@ void checkWiFiConnection()
   }
 }
 
-// ====== Power Management ======
-void checkInactivity()
-{
-  if (ENABLE_AUTO_SLEEP && (millis() - lastActivityTime) > INACTIVITY_TIMEOUT)
-  {
-    Serial.println("No activity for 10 minutes. Entering light sleep...");
-    esp_sleep_enable_timer_wakeup(INACTIVITY_TIMEOUT * 1000); // Convert ms to µs
-    esp_light_sleep_start();
-    Serial.println("Woke from light sleep.");
-    lastActivityTime = millis(); // Reset timer after waking
-  }
-}
-
 // ====== HTTP Handlers ======
 void handleRoot()
 {
-  lastActivityTime = millis();
   String help = "ESP32 BLE Keyboard Remote\n\n";
   help += "Available endpoints:\n";
   help += "  GET /ctrlaltdel       - Send Ctrl+Alt+Del\n";
@@ -135,20 +116,17 @@ void handleRoot()
 void handleCtrlAlt()
 {
   sendCtrlAltDel();
-  lastActivityTime = millis();
   server.send(200, "text/plain", "Sent Ctrl+Alt+Del");
 }
 
 void handleSleep()
 {
   sendSleepCombo();
-  lastActivityTime = millis();
   server.send(200, "text/plain", "Sent Sleep Combo");
 }
 
 void handleLedToggle()
 {
-  lastActivityTime = millis();
   ledState = !ledState;
   digitalWrite(LED_PIN, ledState ? HIGH : LOW);
   String msg = String("LED is now ") + (ledState ? "ON" : "OFF");
@@ -158,7 +136,6 @@ void handleLedToggle()
 
 void handleType()
 {
-  lastActivityTime = millis();
   if (!bleKeyboard.isConnected())
   {
     server.send(400, "text/plain", "BLE keyboard not connected");
@@ -193,9 +170,6 @@ void setup()
   Serial.begin(115200);
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
-
-  // Initialize activity timer
-  lastActivityTime = millis();
 
   // Start BLE keyboard
   Serial.println("Starting BLE Keyboard...");
@@ -242,6 +216,5 @@ void setup()
 void loop()
 {
   checkWiFiConnection();
-  checkInactivity();
   server.handleClient();
 }
