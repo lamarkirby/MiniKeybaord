@@ -1,0 +1,15 @@
+{
+    "keep": {
+        "days": true,
+        "amount": 14
+    },
+    "auditLog": "/Users/michael/code/sand/MiniKeybaord/logs/.b34ca82388855315da8f54313ecc03a2ca07b9f4-audit.json",
+    "files": [
+        {
+            "date": 1762366474973,
+            "name": "/Users/michael/code/sand/MiniKeybaord/logs/mcp-puppeteer-2025-11-05.log",
+            "hash": "765de13fd1bac296d984685ba519636995955fab72387c5e82f37ef8c3883e46"
+        }
+    ],
+    "hashType": "sha256"
+}

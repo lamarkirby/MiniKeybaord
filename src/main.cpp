@@ -1,220 +1,122 @@
 #include <Arduino.h>
-#include <WiFi.h>
-#include <WebServer.h>
-#include <BleKeyboard.h>
+#include <esp_task_wdt.h>
 #include "secrets.h"
+#include "config.h"
+#include "managers/BLEKeyboardManager.h"
+#include "managers/WiFiManager.h"
+#include "managers/LEDManager.h"
+#include "managers/WebServerManager.h"
+#include "auth/authenticator.h"
+#include "utils/logger.h"
 
-// ===== BLE Keyboard =====
-BleKeyboard bleKeyboard("TopoConKeyboard", "Topo Consulting LLC", 100);
+/**
+ * @file main.cpp
+ * @brief ESP32 BLE Keyboard - Main Application
+ *
+ * Architecture:
+ * - Modular design with manager classes
+ * - Non-blocking operations throughout
+ * - Dependency injection for testability
+ * - Clean separation of concerns
+ *
+ * Flow:
+ * 1. setup() initializes all managers
+ * 2. loop() calls update() on each manager
+ * 3. Managers handle their own state and timing
+ */
 
-// ===== Web Server =====
-WebServer server(80);
-
-// ===== LED Config =====
-const int LED_PIN = 12; // Onboard LED for most ESP32 dev boards
-bool ledState = false;
-
-// ===== WiFi Config =====
-unsigned long lastWiFiCheck = 0;
-unsigned long wifiFailTime = 0;
-bool wifiConnected = false;
-bool ledFlashing = false;
-
-// ====== BLE Functions ======
-void sendCtrlAltDel()
-{
-  if (bleKeyboard.isConnected())
-  {
-    Serial.println("Sending Ctrl+Alt+Del...");
-    bleKeyboard.press(KEY_LEFT_CTRL);
-    bleKeyboard.press(KEY_LEFT_ALT);
-    bleKeyboard.press(KEY_DELETE);
-    delay(100);
-    bleKeyboard.releaseAll();
-  }
-  else
-  {
-    Serial.println("BLE not connected.");
-  }
-}
-
-void sendSleepCombo()
-{
-  if (bleKeyboard.isConnected())
-  {
-    Serial.println("Sending Win+X -> U -> S (Sleep)...");
-    bleKeyboard.press(KEY_LEFT_GUI);
-    bleKeyboard.press('x');
-    bleKeyboard.releaseAll();
-    delay(500);
-    bleKeyboard.press('u');
-    bleKeyboard.releaseAll();
-    delay(500);
-    bleKeyboard.press('s');
-    bleKeyboard.releaseAll();
-  }
-  else
-  {
-    Serial.println("BLE not connected.");
-  }
-}
-
-// ====== WiFi Monitoring ======
-void checkWiFiConnection()
-{
-  unsigned long now = millis();
-
-  if (WiFi.status() == WL_CONNECTED)
-  {
-    if (!wifiConnected)
-    {
-      wifiConnected = true;
-      ledFlashing = false;
-      digitalWrite(LED_PIN, LOW);
-      Serial.println("\nWiFi reconnected!");
-    }
-    wifiFailTime = 0; // Reset fail timer
-    lastWiFiCheck = now;
-  }
-  else
-  {
-    if (wifiConnected)
-    {
-      wifiConnected = false;
-      wifiFailTime = now;
-      Serial.println("\nWiFi disconnected!");
-    }
-
-    // If disconnected for more than 60 seconds, start flashing
-    if (now - wifiFailTime > 60000)
-    {
-      ledFlashing = true;
-    }
-  }
-
-  // Handle LED flashing (5 sec on, 5 sec off)
-  if (ledFlashing)
-  {
-    unsigned long flashCycle = (now / 5000) % 2; // Alternates every 5 seconds
-    digitalWrite(LED_PIN, flashCycle ? HIGH : LOW);
-  }
-}
-
-// ====== HTTP Handlers ======
-void handleRoot()
-{
-  String help = "ESP32 BLE Keyboard Remote\n\n";
-  help += "Available endpoints:\n";
-  help += "  GET /ctrlaltdel       - Send Ctrl+Alt+Del\n";
-  help += "  GET /sleep            - Send Win+X, U, S (Sleep)\n";
-  help += "  GET /led/toggle       - Toggle LED connected to pin " + String(LED_PIN) + "\n";
-  help += "  GET /type?msg=TEXT    - Type text via BLE keyboard\n";
-  help += "  GET /                 - Show this help\n";
-  server.send(200, "text/plain", help);
-}
-
-void handleCtrlAlt()
-{
-  sendCtrlAltDel();
-  server.send(200, "text/plain", "Sent Ctrl+Alt+Del");
-}
-
-void handleSleep()
-{
-  sendSleepCombo();
-  server.send(200, "text/plain", "Sent Sleep Combo");
-}
-
-void handleLedToggle()
-{
-  ledState = !ledState;
-  digitalWrite(LED_PIN, ledState ? HIGH : LOW);
-  String msg = String("LED is now ") + (ledState ? "ON" : "OFF");
-  Serial.println(msg);
-  server.send(200, "text/plain", msg);
-}
-
-void handleType()
-{
-  if (!bleKeyboard.isConnected())
-  {
-    server.send(400, "text/plain", "BLE keyboard not connected");
-    return;
-  }
-
-  if (!server.hasArg("msg"))
-  {
-    server.send(400, "text/plain", "Missing 'msg' parameter");
-    return;
-  }
-
-  String msg = server.arg("msg");
-  Serial.println("Typing: " + msg);
-
-  // Send message in 4 - character chunks 
-  const int MAX_CHUNK = 4;
-  for (int i = 0; i < msg.length(); i += MAX_CHUNK)
-  {
-    String chunk = msg.substring(i, i + MAX_CHUNK);
-    bleKeyboard.print(chunk);
-    delay(100); // small delay between chunks
-  }
-  bleKeyboard.releaseAll();
-
-  server.send(200, "text/plain", "Typed message: " + msg);
-}
+// ===== Global Manager Instances =====
+BLEKeyboardManager bleManager;
+WiFiManager wifiManager;
+LEDManager ledManager(Config::LED::PIN);
+WebServerManager webServer(Config::HTTP::SERVER_PORT);
+Authenticator authenticator(API_KEY);
 
 // ====== Setup ======
-void setup()
-{
-  Serial.begin(115200);
-  pinMode(LED_PIN, OUTPUT);
-  digitalWrite(LED_PIN, LOW);
 
-  // Start BLE keyboard
-  Serial.println("Starting BLE Keyboard...");
-  bleKeyboard.begin();
+void setup() {
+    Serial.begin(115200);
+    delay(100);  // Allow serial to stabilize
 
-  // Connect to WiFi
-  Serial.println("Connecting to WiFi...");
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 120) // 120 * 500ms = 60 seconds
-  {
-    delay(500);
-    Serial.print(".");
-    attempts++;
-  }
+    LOG_HEADER("ESP32 BLE Keyboard - Secure Edition v2.0");
+    LOG_RAW("");
 
-  if (WiFi.status() == WL_CONNECTED)
-  {
-    wifiConnected = true;
-    Serial.println("\nWiFi connected!");
-    Serial.println(WiFi.localIP());
-  }
-  else
-  {
-    Serial.println("\nWiFi connection timeout. Will retry in background.");
-    wifiFailTime = millis();
-    WiFi.reconnect(); // Enable WiFi reconnection in background
-  }
+    // Initialize watchdog timer
+    esp_task_wdt_init(Config::Watchdog::TIMEOUT_SECONDS, true);
+    esp_task_wdt_add(NULL);
+    LOG_INFO_F("Watchdog timer enabled (%d seconds)", Config::Watchdog::TIMEOUT_SECONDS);
 
-  // Register HTTP routes
-  server.on("/", handleRoot);
-  server.on("/ctrlaltdel", handleCtrlAlt);
-  server.on("/sleep", handleSleep);
-  server.on("/led/toggle", handleLedToggle);
-  server.on("/type", handleType);
+    // Initialize LED
+    ledManager.begin();
+    LOG_INFO("LED manager initialized");
 
-  // Start HTTP server
-  server.begin();
-  Serial.println("HTTP server started.");
+    // Initialize BLE keyboard
+    bleManager.begin();
+    LOG_INFO_F("BLE keyboard started: %s", bleManager.getDeviceName());
+
+    // Connect to WiFi
+    LOG_INFO_F("Connecting to WiFi: %s", WIFI_SSID);
+    bool wifiConnected = wifiManager.begin(WIFI_SSID, WIFI_PASSWORD);
+
+    if (wifiConnected) {
+        LOG_INFO_F("WiFi connected! IP: %s", wifiManager.getIP().toString().c_str());
+    } else {
+        LOG_ERROR("WiFi connection timeout. Will retry in background.");
+    }
+
+    // Initialize web server with dependencies
+    webServer.begin(&bleManager, &ledManager, &authenticator);
+
+    // Print startup summary
+    LOG_RAW("");
+    LOG_SEPARATOR();
+    LOG_RAW("System Ready");
+    LOG_SEPARATOR();
+    LOG_INFO_F("BLE Device: %s", bleManager.getDeviceName());
+    LOG_INFO_F("WiFi Status: %s", wifiManager.getStatusString());
+    if (wifiManager.isConnected()) {
+        LOG_INFO_F("IP Address: %s", wifiManager.getIP().toString().c_str());
+        LOG_INFO_F("Signal: %d dBm", wifiManager.getRSSI());
+    }
+    LOG_INFO_F("HTTP Port: %d", webServer.getPort());
+    LOG_INFO_F("Rate Limit: %d req/%dms",
+               Config::RateLimit::MAX_REQUESTS,
+               Config::RateLimit::WINDOW_MS);
+    LOG_RAW("");
+    LOG_RAW("⚠️  SECURITY: API key required in X-API-Key header");
+    LOG_SEPARATOR();
+    LOG_RAW("");
 }
 
 // ====== Loop ======
-void loop()
-{
-  checkWiFiConnection();
-  server.handleClient();
+
+void loop() {
+    // Reset watchdog timer
+    esp_task_wdt_reset();
+
+    // Update all managers (all non-blocking)
+    wifiManager.update();
+    bleManager.update();
+    ledManager.update();
+    webServer.handleClient();
+
+    // Update LED status based on WiFi state
+    static bool lastWiFiState = false;
+    bool currentWiFiState = wifiManager.isConnected();
+
+    if (lastWiFiState != currentWiFiState) {
+        // WiFi state changed
+        if (currentWiFiState) {
+            LOG_INFO_F("WiFi reconnected! IP: %s", wifiManager.getIP().toString().c_str());
+            ledManager.setFlashing(false);
+        } else {
+            LOG_ERROR("WiFi disconnected!");
+        }
+        lastWiFiState = currentWiFiState;
+    }
+
+    // Check for long-term WiFi disconnect
+    if (wifiManager.isDisconnectedLongTerm()) {
+        ledManager.setFlashing(true);
+    }
 }
